@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Digital Signage Player</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            overflow: hidden;
+            background: #000;
+            font-family: Arial, sans-serif;
+        }
+        #player-container {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+        #content {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+        #content.image {
+            width: auto;
+            height: auto;
+        }
+        #content.video {
+            width: 100%;
+            height: 100%;
+        }
+        #content.webpage {
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+        #content.text {
+            color: white;
+            font-size: 48px;
+            text-align: center;
+            padding: 20px;
+        }
+        #status {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 12px;
+            display: none;
+        }
+        #status.show {
+            display: block;
+        }
+        #ticker {
+            position: fixed;
+            left: 0;
+            right: 0;
+            height: 50px;
+            overflow: hidden;
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+        }
+        #ticker.top {
+            top: 0;
+        }
+        #ticker.bottom {
+            bottom: 0;
+        }
+        #ticker-text {
+            white-space: nowrap;
+            display: inline-block;
+            animation: scroll linear infinite;
+        }
+        @keyframes scroll {
+            0% {
+                transform: translateX(100%);
+            }
+            100% {
+                transform: translateX(-100%);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="status"></div>
+    <div id="ticker" style="display: none;"></div>
+    <div id="player-container">
+        <div id="content"></div>
+    </div>
+
+    <script>
+        const API_BASE = '/api';
+        const DEVICE_ID = getDeviceId();
+        const SYNC_INTERVAL = 30000; // 30 seconds
+        let currentPlaylist = null;
+        let currentIndex = 0;
+        let playlistVersion = 0;
+        let currentTicker = null;
+        let deviceId = null;
+
+        function getDeviceId() {
+            // Get device ID from URL parameter or localStorage
+            const params = new URLSearchParams(window.location.search);
+            let deviceId = params.get('device');
+            if (!deviceId) {
+                deviceId = localStorage.getItem('deviceId');
+            }
+            if (!deviceId) {
+                // Generate a temporary device ID
+                deviceId = 'temp_' + Math.random().toString(36).substr(2, 9);
+                localStorage.setItem('deviceId', deviceId);
+            }
+            return deviceId;
+        }
+
+        async function registerDevice() {
+            // Auto-register with a default name
+            const deviceName = 'Player-' + DEVICE_ID.substring(0, 8);
+
+            try {
+                const response = await fetch(`${API_BASE}/register`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        name: deviceName,
+                        uuid: DEVICE_ID
+                    })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    deviceId = data.device.id;
+                    showStatus('Device registered: ' + data.device.id);
+                    // Immediately fetch playlist after registration
+                    setTimeout(fetchPlaylist, 500);
+                    return data;
+                }
+            } catch (error) {
+                console.error('Registration error:', error);
+                showStatus('Registration failed - will retry');
+            }
+        }
+
+        async function fetchPlaylist() {
+            try {
+                // Try UUID-based route first, fallback to generic route
+                const response = await fetch(`${API_BASE}/playlist/${DEVICE_ID}`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const playlist = data.playlist;
+                    
+                    if (playlist) {
+                        // Update if version changed or if we don't have a playlist yet
+                        if (playlist.version !== playlistVersion || !currentPlaylist) {
+                            currentPlaylist = playlist;
+                            playlistVersion = playlist.version || 0;
+                            currentIndex = 0;
+                            
+                            if (playlist.items && playlist.items.length > 0) {
+                                showStatus('Playlist loaded: ' + playlist.name + ' (' + playlist.items.length + ' items)');
+                            } else {
+                                showStatus('No playlist assigned - waiting for admin...');
+                            }
+                        }
+                    }
+                } else {
+                    showStatus('Server error - check connection');
+                }
+            } catch (error) {
+                console.error('Fetch playlist error:', error);
+                showStatus('Connection error - retrying...');
+            }
+        }
+
+        async function fetchTicker() {
+            if (!deviceId) return;
+            
+            try {
+                const response = await fetch(`${API_BASE}/ticker/device/${deviceId}`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const ticker = data.ticker;
+                    
+                    if (ticker && ticker !== currentTicker) {
+                        currentTicker = ticker;
+                        displayTicker(ticker);
+                    } else if (!ticker) {
+                        hideTicker();
+                    }
+                }
+            } catch (error) {
+                console.error('Fetch ticker error:', error);
+            }
+        }
+
+        function displayTicker(ticker) {
+            const tickerDiv = document.getElementById('ticker');
+            const tickerText = document.getElementById('ticker-text') || document.createElement('div');
+            
+            tickerText.id = 'ticker-text';
+            tickerText.textContent = ticker.text;
+            tickerText.style.color = ticker.font_color;
+            tickerText.style.fontSize = ticker.font_size + 'px';
+            
+            tickerDiv.style.backgroundColor = ticker.background_color;
+            tickerDiv.className = ticker.position;
+            
+            // Calculate animation duration based on speed (1-100, where 100 is fastest)
+            const duration = (100 - ticker.speed + 1) * 2; // 2-200 seconds
+            tickerText.style.animationDuration = duration + 's';
+            
+            tickerDiv.innerHTML = '';
+            tickerDiv.appendChild(tickerText);
+            tickerDiv.style.display = 'flex';
+        }
+
+        function hideTicker() {
+            document.getElementById('ticker').style.display = 'none';
+            currentTicker = null;
+        }
+
+        function showStatus(message) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.classList.add('show');
+            setTimeout(() => {
+                status.classList.remove('show');
+            }, 3000);
+        }
+
+        function playNext() {
+            if (!currentPlaylist || !currentPlaylist.items || currentPlaylist.items.length === 0) {
+                // No playlist, show default message
+                showDefaultContent();
+                setTimeout(playNext, 5000);
+                return;
+            }
+
+            const item = currentPlaylist.items[currentIndex];
+            const contentDiv = document.getElementById('content');
+            contentDiv.innerHTML = '';
+
+            if (item.type === 'image') {
+                const img = document.createElement('img');
+                img.src = item.url;
+                img.id = 'content';
+                img.className = 'image';
+                img.onerror = () => {
+                    showStatus('Error loading image');
+                    setTimeout(playNext, item.duration * 1000);
+                };
+                contentDiv.appendChild(img);
+                setTimeout(playNext, item.duration * 1000);
+
+            } else if (item.type === 'video') {
+                const video = document.createElement('video');
+                video.src = item.url;
+                video.id = 'content';
+                video.className = 'video';
+                video.autoplay = true;
+                video.muted = true;
+                video.onended = () => {
+                    playNext();
+                };
+                video.onerror = () => {
+                    showStatus('Error loading video');
+                    setTimeout(playNext, item.duration * 1000);
+                };
+                contentDiv.appendChild(video);
+
+            } else if (item.type === 'webpage') {
+                const iframe = document.createElement('iframe');
+                iframe.src = item.url;
+                iframe.id = 'content';
+                iframe.className = 'webpage';
+                contentDiv.appendChild(iframe);
+                setTimeout(playNext, item.duration * 1000);
+
+            } else if (item.type === 'text') {
+                const textDiv = document.createElement('div');
+                textDiv.id = 'content';
+                textDiv.className = 'text';
+                // Fetch text content if URL provided
+                if (item.url) {
+                    fetch(item.url)
+                        .then(r => r.text())
+                        .then(text => {
+                            textDiv.textContent = text;
+                        });
+                } else {
+                    textDiv.textContent = item.text || 'No content';
+                }
+                contentDiv.appendChild(textDiv);
+                setTimeout(playNext, item.duration * 1000);
+            }
+
+            // Move to next item
+            currentIndex = (currentIndex + 1) % currentPlaylist.items.length;
+        }
+
+        function showDefaultContent(message) {
+            const contentDiv = document.getElementById('content');
+            const msg = message || 'Waiting for playlist...';
+            contentDiv.innerHTML = `<div id="content" class="text">${msg}<br><small>Device ID: ${DEVICE_ID}</small></div>`;
+        }
+
+        // Initialize
+        showDefaultContent('Loading...');
+        
+        // Register device first, then fetch playlist
+        async function initialize() {
+            // Check if device is already registered
+            const registered = localStorage.getItem('deviceRegistered');
+            if (!registered) {
+                const regResponse = await registerDevice();
+                if (regResponse && regResponse.device) {
+                    deviceId = regResponse.device.id;
+                }
+            } else {
+                // Try to get device ID from server
+                try {
+                    const response = await fetch(`${API_BASE}/devices`);
+                    const data = await response.json();
+                    const device = data.devices.find(d => d.uuid === DEVICE_ID);
+                    if (device) {
+                        deviceId = device.id;
+                    }
+                } catch (e) {
+                    console.error('Error getting device ID:', e);
+                }
+            }
+            // Fetch playlist and ticker immediately
+            await fetchPlaylist();
+            await fetchTicker();
+            // Start playing
+            playNext();
+        }
+
+        initialize();
+
+        // Sync playlist and ticker periodically
+        setInterval(fetchPlaylist, SYNC_INTERVAL);
+        setInterval(fetchTicker, SYNC_INTERVAL);
+
+        // Handle visibility change (pause/resume)
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && currentPlaylist) {
+                playNext();
+            }
+        });
+    </script>
+</body>
+</html>
+
